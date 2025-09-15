@@ -3,20 +3,44 @@ import fetch from "node-fetch";
 import admin from "firebase-admin";
 
 // Initialize Firebase Admin using service account JSON from env
-const serviceAccountJson = process.env.FIREBASE_KEY_JSON;
-if (!serviceAccountJson) {
-  console.error("Missing FIREBASE_KEY_JSON env var");
+function loadServiceAccount() {
+  const rawJson = process.env.FIREBASE_KEY_JSON;
+  const b64 = process.env.FIREBASE_KEY_JSON_BASE64;
+  let jsonString = undefined;
+  if (rawJson && rawJson.trim()) {
+    jsonString = rawJson;
+  } else if (b64 && b64.trim()) {
+    try {
+      jsonString = Buffer.from(b64, "base64").toString("utf8");
+    } catch (e) {
+      console.error("Failed to base64-decode FIREBASE_KEY_JSON_BASE64:", e.message);
+    }
+  }
+  if (!jsonString) return undefined;
+  try {
+    const parsed = JSON.parse(jsonString);
+    if (parsed && typeof parsed === "object" && typeof parsed.private_key === "string") {
+      parsed.private_key = parsed.private_key.replace(/\\n/g, "\n");
+    }
+    return parsed;
+  } catch (e) {
+    console.error("Invalid FIREBASE_KEY_JSON: not valid JSON:", e.message);
+    return undefined;
+  }
 }
 
-const serviceAccount = serviceAccountJson ? JSON.parse(serviceAccountJson) : undefined;
-
-if (!admin.apps.length && serviceAccount) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
+let db = null;
+try {
+  const serviceAccount = loadServiceAccount();
+  if (!admin.apps.length && serviceAccount) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+  }
+  db = admin.apps.length ? admin.firestore() : null;
+} catch (e) {
+  console.error("Firebase Admin init failed:", e.message);
 }
-
-const db = admin.apps.length ? admin.firestore() : null;
 
 // Product map (name -> document ID)
 const PRODUCT_MAP = {
