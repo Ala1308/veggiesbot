@@ -1,5 +1,4 @@
 import express from "express";
-import bodyParser from "body-parser";
 import fetch from "node-fetch";
 import admin from "firebase-admin";
 
@@ -74,9 +73,9 @@ async function sendMessage(chatId, text) {
 }
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-app.post("/api", async (req, res) => {
+app.post("*", async (req, res) => {
   const update = req.body;
   const msg = update && update.message;
   if (!msg || !msg.text) {
@@ -132,6 +131,8 @@ app.post("/api", async (req, res) => {
   return res.status(200).send("ok");
 });
 
-export default app;
+export default function handler(req, res) {
+  return app(req, res);
+}
 
 
