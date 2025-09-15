@@ -63,6 +63,25 @@ const PRODUCT_MAP = {
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const TELEGRAM_API = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : null;
 
+function normalizeName(input) {
+  return (input || "")
+    .toString()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[_\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+const NORMALIZED_PRODUCT_MAP = (() => {
+  const out = {};
+  for (const [name, docId] of Object.entries(PRODUCT_MAP)) {
+    out[normalizeName(name)] = docId;
+  }
+  return out;
+})();
+
 async function sendMessage(chatId, text) {
   if (!TELEGRAM_API) return;
   await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -75,27 +94,43 @@ async function sendMessage(chatId, text) {
 const app = express();
 app.use(express.json());
 
+// Health check
+app.get("*", (req, res) => {
+  res.status(200).send("ok");
+});
+
 app.post("*", async (req, res) => {
   const update = req.body;
-  const msg = update && update.message;
+  const msg = update && (update.message || update.edited_message || update.channel_post);
   if (!msg || !msg.text) {
     return res.status(200).send("ok");
   }
 
   const chatId = msg.chat.id;
   const text = msg.text.trim();
+  let commandToken = null;
+  if (Array.isArray(msg.entities)) {
+    const cmd = msg.entities.find((e) => e.type === "bot_command" && e.offset === 0);
+    if (cmd) {
+      commandToken = text.slice(cmd.offset, cmd.offset + cmd.length);
+    }
+  }
+  if (!commandToken) {
+    commandToken = text.split(/\s+/)[0];
+  }
+  const baseCommand = commandToken.split("@")[0];
 
-  if (text.startsWith("/help")) {
+  if (baseCommand === "/help") {
     await sendMessage(
       chatId,
       "Usage:\n/refill\nName, price, stock\n\nExample:\n/refill\nAvocado, 0.95, 40\nPomme Fuji Apple, 0.3, 100"
     );
-  } else if (text.startsWith("/refill")) {
+  } else if (baseCommand === "/refill") {
     if (!db) {
       await sendMessage(chatId, "Server misconfigured: DB not initialized");
       return res.status(200).send("ok");
     }
-    const lines = text.split("\n").slice(1);
+    const lines = text.split(/\r?\n/).slice(1);
     const results = [];
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -105,7 +140,11 @@ app.post("*", async (req, res) => {
         continue;
       }
       const [name, priceStr, stockStr] = parts;
-      const docId = PRODUCT_MAP[name];
+      let docId = PRODUCT_MAP[name];
+      if (!docId) {
+        const normalized = normalizeName(name);
+        docId = NORMALIZED_PRODUCT_MAP[normalized];
+      }
       if (!docId) {
         results.push(`❌ Unknown item: ${name}`);
         continue;
