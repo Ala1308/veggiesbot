@@ -86,6 +86,7 @@ const PRODUCT_MAP = {
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const TELEGRAM_API = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : null;
+const FIRESTORE_COLLECTION = process.env.FIRESTORE_COLLECTION || "foodMeuns";
 
 function normalizeName(input) {
   return (input || "")
@@ -113,6 +114,25 @@ async function sendMessage(chatId, text) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text }),
   });
+}
+
+async function findDocIdByName(collectionRef, targetName) {
+  // 1) Exact match query on 'name' field
+  try {
+    const exact = await collectionRef.where("name", "==", targetName).limit(1).get();
+    if (!exact.empty) return exact.docs[0].id;
+  } catch {}
+  // 2) Fallback: scan up to 500 docs and compare normalized names client-side
+  try {
+    const snapshot = await collectionRef.limit(500).get();
+    const targetNorm = normalizeName(targetName);
+    for (const doc of snapshot.docs) {
+      const data = doc.data() || {};
+      const docName = typeof data.name === "string" ? data.name : "";
+      if (normalizeName(docName) === targetNorm) return doc.id;
+    }
+  } catch {}
+  return null;
 }
 
 const app = express();
@@ -144,7 +164,7 @@ app.post("*", async (req, res) => {
   }
   const baseCommand = commandToken.split("@")[0];
 
-  if (baseCommand === "/help") {
+  if (baseCommand === "/help" || baseCommand === "/start") {
     await sendMessage(
       chatId,
       "Usage:\n/refill\nName, price, stock\n\nExample:\n/refill\nAvocado, 0.95, 40\nPomme Fuji Apple, 0.3, 100"
@@ -156,6 +176,7 @@ app.post("*", async (req, res) => {
     }
     const lines = text.split(/\r?\n/).slice(1);
     const results = [];
+    const collectionRef = db.collection(FIRESTORE_COLLECTION);
     for (const line of lines) {
       if (!line.trim()) continue;
       const parts = line.split(",").map((p) => p.trim());
@@ -169,10 +190,6 @@ app.post("*", async (req, res) => {
         const normalized = normalizeName(name);
         docId = NORMALIZED_PRODUCT_MAP[normalized];
       }
-      if (!docId) {
-        results.push(`❌ Unknown item: ${name}`);
-        continue;
-      }
       const price = Number.parseFloat(priceStr);
       const stock = Number.parseInt(stockStr, 10);
       if (!Number.isFinite(price) || !Number.isFinite(stock)) {
@@ -180,8 +197,30 @@ app.post("*", async (req, res) => {
         continue;
       }
       try {
-        await db.collection("products").doc(docId).update({ price, stock });
-        results.push(`✅ ${name} → price ${price}, stock ${stock}`);
+        let updated = false;
+        if (docId) {
+          try {
+            await collectionRef.doc(docId).update({ price, stock });
+            updated = true;
+            results.push(`✅ ${name} (by map) → price ${price}, stock ${stock}`);
+          } catch (err) {
+            // If mapped ID not found, fall through to name search
+            if (String(err && err.code).includes("not-found") || String(err && err.message).toLowerCase().includes("not found")) {
+              // continue to name search
+            } else {
+              throw err;
+            }
+          }
+        }
+        if (!updated) {
+          const foundId = await findDocIdByName(collectionRef, name);
+          if (!foundId) {
+            results.push(`❌ ${name}: document not found in '${FIRESTORE_COLLECTION}' (tried map + name search)`);
+          } else {
+            await collectionRef.doc(foundId).update({ price, stock });
+            results.push(`✅ ${name} (by name) → price ${price}, stock ${stock}`);
+          }
+        }
       } catch (err) {
         results.push(`❌ ${name} failed: ${err.message}`);
       }
